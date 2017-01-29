@@ -20,7 +20,6 @@ GPIO.setmode(GPIO.BOARD)
 class FrameCapture:
 	def __init__(self, src=0):
 		self.firstFrame = None
-		self.frameCounter = 0
 		self.camera = cv2.VideoCapture(src)
 		while not self.camera.isOpened():
 			self.camera = cv2.VideoCapture(src)	
@@ -41,18 +40,15 @@ class FrameCapture:
 	def capture(self): 
 		while(not self.stopped):
 			(self.grabbed, self.frame) = self.camera.read()
-			self.frameCounter +=1
-			if self.frameCounter > 10000:
-				self.frameCounter = 0
-
-		print('Releasing camera')
+		
+		#print('Releasing camera')
 		self.camera.release()
 
 	# Read the captured frame as-is.
 	def readFrame(self):
 		# resize this frame, convert it to grayscale, and blur it
 		self.frame = imutils.resize(self.frame, height=240)
-		return self.frame, self.frameCounter	
+		return self.frame	
  
 	def prepareFrame(self, frame):
 		gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -66,7 +62,7 @@ class Sensor:
 	# First sensor is pointing downwards and second detects frontal obstructions.
 	# static variable.
 	sensors = [{'name': 'Down firing', 'trig': 16, 'echo': 18}, {'name': 'Frontal', 'trig': 13, 'echo': 15}]
-	max_observations = 10
+	max_observations = 5
 
 	def __init__(self, sensor_id=0):
 		#print('Turning sensor %d on...' % sensor_id)
@@ -139,8 +135,8 @@ class Sensor:
 class ObstacleWarning:
 	# Class variables
 	warning_distance = 240 	# 8 ft
-	crowd_size = 1		# What defines "crowd"?
-	hush_period = 0.2	# Minimum period between warnings.
+	crowd_size = 5		# What defines "crowd"?
+	hush_period = 0.1	# Minimum period between warnings.
 
 	def __init__(self):
 		# Queue to maintain all objectacles detected and all uneven surface detection
@@ -160,11 +156,17 @@ class ObstacleWarning:
 
 		# Prepare the sensors.
 		self.front_sensor_last_reading = 0
-		self.down_firing_sensor_last_reading = 0
 		self.down_firing_sensor_readings = []
 
 		self.down_firing_sensor = Sensor(sensor_id=0).start()
 		self.front_sensor = Sensor(sensor_id=1).start()
+
+		calibration = []
+		while len(calibration) < 100:
+			calibration.append(self.down_firing_sensor.read())
+		
+		# calibrated distance based on person's height, sensor angle, etc.
+		self.down_firing_sensor_last_reading = sum(calibration) / float(len(calibration))
 
 		# People detector.
 		self.hog = cv2.HOGDescriptor()
@@ -212,7 +214,7 @@ class ObstacleWarning:
 			if distance <= ObstacleWarning.warning_distance:
 				text = 'crowd' if number_of_people > ObstacleWarning.crowd_size else 'people' 
 			# Just queue the warning.
-			self.obstacle_warning_queue['queue'].append('watch out for %s at %d feet' % (text, floor(distance/(12*2.54)))) 
+			self.obstacle_warning_queue['queue'].append('%s at %d feet' % (text, floor(distance/(12*2.54)))) 
 		else:
 			# Not people. See if there are other obstacles such as objects, etc.
 			gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -243,11 +245,8 @@ class ObstacleWarning:
 			self.down_firing_sensor_readings.pop(0)
 			average = sum(self.down_firing_sensor_readings) / float(len(self.down_firing_sensor_readings))
 			#print ('Average %f %f' % (average, self.down_firing_sensor_last_reading))
-			if not self.down_firing_sensor_last_reading:
-				self.down_firing_sensor_last_reading = average
-			else:
-				if abs(self.down_firing_sensor_last_reading - average) > 15:
-					self.surface_warning_queue['queue'].append('Uneven surface')
+			if average - self.down_firing_sensor_last_reading > 15:
+				self.surface_warning_queue['queue'].append('Uneven surface')
 				
 	def process(self):
 		# Create a thread for voice outputs, so it is on its own.
@@ -256,7 +255,7 @@ class ObstacleWarning:
 		t.start()
 
 		while not self.stopped:
-			self.frame, frameCounter = self.camera.readFrame()
+			self.frame = self.camera.readFrame()
 
 			self.hog_detection()
 			self.uneven_surface_detection()
