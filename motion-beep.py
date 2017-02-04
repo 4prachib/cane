@@ -62,7 +62,7 @@ class Sensor:
 	# First sensor is pointing downwards and second detects frontal obstructions.
 	# static variable.
 	sensors = [{'name': 'Down firing', 'trig': 16, 'echo': 18}, {'name': 'Frontal', 'trig': 13, 'echo': 15}]
-	max_observations = 5
+	max_observations = 3
 
 	def __init__(self, sensor_id=0):
 		#print('Turning sensor %d on...' % sensor_id)
@@ -157,16 +157,9 @@ class ObstacleWarning:
 		# Prepare the sensors.
 		self.front_sensor_last_reading = 0
 		self.down_firing_sensor_readings = []
-
+		self.down_firing_sensor_last_reading = 0
 		self.down_firing_sensor = Sensor(sensor_id=0).start()
 		self.front_sensor = Sensor(sensor_id=1).start()
-
-		calibration = []
-		while len(calibration) < 100:
-			calibration.append(self.down_firing_sensor.read())
-		
-		# calibrated distance based on person's height, sensor angle, etc.
-		self.down_firing_sensor_last_reading = sum(calibration) / float(len(calibration))
 
 		# People detector.
 		self.hog = cv2.HOGDescriptor()
@@ -178,11 +171,11 @@ class ObstacleWarning:
 	def hog_detection(self):
 		#start_time = datetime.datetime.now()
 		frame = self.frame		
-		(rects, weights) = self.hog.detectMultiScale(frame.copy(), winStride=(8, 8),padding=(24, 24), scale=1.1)
+		(rects, weights) = self.hog.detectMultiScale(frame.copy(), winStride=(8, 8),padding=(24, 24), scale=1.05)
 
 		# draw the original bounding boxes
 		#for (x, y, w, h) in rects:
-		#	cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+		#	cv2.rectangle(self.frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
 		# apply non-maxima suppression to the bounding boxes using a
 		# fairly large overlap threshold to try to maintain overlapping
@@ -191,6 +184,8 @@ class ObstacleWarning:
 		pick = non_max_suppression(rects, probs=None, overlapThresh=0.65)
  			
 		number_of_people = 0
+		number_of_people_in_warning_zone = 0
+
 		# Distance in cm of any obstruction detected by front sensor.
 		distance = self.front_sensor.read()
 		if self.front_sensor_last_reading == distance:
@@ -206,15 +201,20 @@ class ObstacleWarning:
 			# If the people in the frame are "too far" ignore them. If the "height"
 			# of rect is smaller than 1/4 of frame height, it is ignored.
 			if (yB-yA) >= frame_height/4:
-				number_of_people = number_of_people +1
+				number_of_people_in_warning_zone += 1
+
+			# This is used to determine if we are in a crowd.
+			number_of_people += 1
 		 
 			#cv2.rectangle(frame, (xA, yA), (xB, yB), (0, 255, 0), 2)
 
-		if number_of_people > 0:
+		if number_of_people_in_warning_zone > 0:
 			if distance <= ObstacleWarning.warning_distance:
 				text = 'crowd' if number_of_people > ObstacleWarning.crowd_size else 'people' 
-			# Just queue the warning.
-			self.obstacle_warning_queue['queue'].append('%s at %d feet' % (text, floor(distance/(12*2.54)))) 
+				# Just queue the warning.
+				self.obstacle_warning_queue['queue'].append('%s at %d feet' % (text, floor(distance/(12*2.54)))) 
+		elif number_of_people > ObstacleWarning.crowd_size:
+			self.obstacle_warning_queue['queue'].append('You are in a crowded place')
 		else:
 			# Not people. See if there are other obstacles such as objects, etc.
 			gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -238,14 +238,25 @@ class ObstacleWarning:
 				self.obstacle_warning_queue['queue'].append('obstacles at %d feet'% floor (distance/(12*2.54)))
 		#print('Took %d' %  (datetime.datetime.now() - start_time).total_seconds())
 
+	def calibrate_down_firing_sensor(self):
+		calibration = []
+		while len(calibration) < 100:
+			calibration.append(self.down_firing_sensor.read())
+		# calibrated distance based on person's height, sensor angle, etc.
+		self.down_firing_sensor_last_reading = sum(calibration) / float(len(calibration))
+		self.add_to_system_queue('calibrated distance %d centimeters' % floor(self.down_firing_sensor_last_reading))
+
 	def uneven_surface_detection(self):
+		if not self.down_firing_sensor_last_reading:
+			return self.calibrate_down_firing_sensor()
+
 		self.down_firing_sensor_readings.append(self.down_firing_sensor.read())
 		if len(self.down_firing_sensor_readings) > 10:
 			# Retire older values.
 			self.down_firing_sensor_readings.pop(0)
 			average = sum(self.down_firing_sensor_readings) / float(len(self.down_firing_sensor_readings))
 			#print ('Average %f %f' % (average, self.down_firing_sensor_last_reading))
-			if average - self.down_firing_sensor_last_reading > 15:
+			if (average - self.down_firing_sensor_last_reading) > 15:
 				self.surface_warning_queue['queue'].append('Uneven surface')
 				
 	def process(self):
@@ -267,14 +278,10 @@ class ObstacleWarning:
 				#(10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
 
 			# show the frame and record if the user presses a key
-			#cv2.imshow("Security Feed", frame)
+			#cv2.imshow("Security Feed", self.frame)
 			#cv2.imshow("Thresh", thresh)
 			#cv2.imshow("Frame Delta", frameDelta)
 			#key = cv2.waitKey(1) & 0xFF
-
-		# cleanup the camera and close any open windows
-		self.camera.stop()
-		cv2.destroyAllWindows()
 
 	def add_to_system_queue(self, text):
 		self.system_queue['queue'].append(text)
@@ -289,10 +296,10 @@ class ObstacleWarning:
 			warned = False
 			if len(self.surface_warning_queue['queue']):
 				text = self.surface_warning_queue['queue'].pop()
-				runPico(text)
-				warned = True
 				# Delete older warnings.
 				del self.surface_warning_queue['queue'][:]
+				runPico(text)
+				warned = True
 			if len(self.obstacle_warning_queue['queue']):
 				now = time.time ()
 				# Don't annoy the user repeatedly if the warnings come too quickly.
@@ -320,7 +327,7 @@ class ObstacleWarning:
 		cv2.destroyAllWindows()
 
 	def handle_ctrl_c(signal, frame):
-		print ('CTRL+C received')
+		#print ('CTRL+C received')
 		self.stop()
 		sys.exit(0)
 		
